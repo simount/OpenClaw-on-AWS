@@ -493,32 +493,8 @@ Resources:
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
             apt-get update
             apt-get install -y docker-ce docker-ce-cli containerd.io
-            systemctl enable docker
-            systemctl start docker
+            systemctl enable docker && systemctl start docker
             usermod -aG docker ubuntu
-          else
-            echo "[4/9] Skipping Docker (EnableSandbox=false)..."
-          fi
-          if [ "${EnableSandbox}" = "true" ]; then
-            echo "[4.5/9] Installing LiteLLM proxy..."
-            apt-get install -y python3-pip python3-venv
-            python3 -m venv /opt/litellm
-            /opt/litellm/bin/pip install 'litellm[proxy]'
-            mkdir -p /etc/litellm
-            python3 -c "
-          import yaml,sys
-          models=[('global.amazon.nova-2-lite-v1:0','amazon.nova-lite-v1:0'),('global.anthropic.claude-sonnet-4-5-20250929-v1:0','anthropic.claude-sonnet-4-5-20250929-v1:0'),('us.amazon.nova-pro-v1:0','amazon.nova-pro-v1:0'),('global.anthropic.claude-opus-4-6-v1','anthropic.claude-opus-4-6-v1'),('global.anthropic.claude-opus-4-5-20251101-v1:0','anthropic.claude-opus-4-5-20251101-v1:0'),('global.anthropic.claude-haiku-4-5-20251001-v1:0','anthropic.claude-haiku-4-5-20251001-v1:0'),('global.anthropic.claude-sonnet-4-20250514-v1:0','anthropic.claude-sonnet-4-20250514-v1:0'),('us.deepseek.r1-v1:0','deepseek.r1-v1:0'),('us.meta.llama3-3-70b-instruct-v1:0','meta.llama3-3-70b-instruct-v1:0'),('moonshotai.kimi-k2.5','moonshotai.kimi-k2.5')]
-          r='$AWS_REGION'
-          cfg={'model_list':[{'model_name':n,'litellm_params':{'model':'bedrock/'+m,'aws_region_name':r}} for n,m in models],'general_settings':{'master_key':None}}
-          yaml.dump(cfg,open('/etc/litellm/config.yaml','w'),default_flow_style=False)
-          "
-            printf '[Unit]\nDescription=LiteLLM Proxy\nAfter=network.target\n[Service]\nType=simple\nUser=ubuntu\nExecStart=/opt/litellm/bin/litellm --config /etc/litellm/config.yaml --host 127.0.0.1 --port 4000\nRestart=always\nRestartSec=5\nEnvironment=AWS_DEFAULT_REGION=%s\nEnvironment=AWS_REGION=%s\n[Install]\nWantedBy=multi-user.target\n' "$AWS_REGION" "$AWS_REGION" > /etc/systemd/system/litellm.service
-            systemctl daemon-reload && systemctl enable litellm && systemctl start litellm
-            echo "Waiting for LiteLLM..."
-            for i in $(seq 1 30); do
-              curl -s http://127.0.0.1:4000/health 2>/dev/null | grep -q "healthy" && echo "LiteLLM healthy" && break
-              sleep 2
-            done
           fi
           echo "[5/9] Installing Node.js..."
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
@@ -572,20 +548,6 @@ Resources:
             exit 1
           fi
           echo "openclaw verified OK: $(/usr/local/bin/openclaw --version)"
-          if [ "${EnableSandbox}" = "true" ]; then
-            echo "[5.5/9] Installing NemoClaw (OpenShell)..."
-            curl -fsSL https://www.nvidia.com/nemoclaw.sh -o /tmp/nc.sh
-            bash /tmp/nc.sh --non-interactive || bash /tmp/nc.sh --non-interactive
-            rm -f /tmp/nc.sh
-            openshell sandbox create --from openclaw --name openclaw-sandbox || true
-            mkdir -p /etc/nemoclaw/policies
-            python3 -c "
-          import yaml
-          p={'version':1,'filesystem_policy':{'include_workdir':True,'read_only':['/usr','/lib','/proc','/etc'],'read_write':['/home/ubuntu/.openclaw','/tmp']},'landlock':{'compatibility':'best_effort'},'process':{'run_as_user':'ubuntu','run_as_group':'ubuntu'},'network_policies':{'litellm_proxy':{'name':'litellm-bedrock-proxy','endpoints':[{'host':'127.0.0.1','port':4000,'enforcement':'enforce','access':'full'}]}}}
-          yaml.dump(p,open('/etc/nemoclaw/policies/strict-bedrock.yaml','w'),default_flow_style=False)
-          "
-            openshell policy set openclaw-sandbox --policy /etc/nemoclaw/policies/strict-bedrock.yaml || true
-          fi
           echo "[6/9] Configuring AWS..."
           sudo -u ubuntu mkdir -p /home/ubuntu/.aws
           sudo -u ubuntu bash -c "printf '[default]\nregion = %s\noutput = json\n' \"$AWS_REGION\" > /home/ubuntu/.aws/config"
@@ -606,31 +568,25 @@ Resources:
           echo "[8/9] Configuring OpenClaw..."
           sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
           GATEWAY_TOKEN=$(openssl rand -hex 24)
-          SANDBOX_MODE="${EnableSandbox}"
-          python3 -c "
-          import json,sys,os
-          t=os.environ.get('GATEWAY_TOKEN','')
+          if [ "${EnableSandbox}" = "true" ]; then
+            echo "Setting up NemoClaw + LiteLLM via external script..."
+            curl -fsSL https://raw.githubusercontent.com/simount/OpenClaw-on-AWS/feature/nemoclaw-litellm-integration/scripts/setup-nemoclaw-litellm.sh -o /tmp/setup-nemoclaw.sh
+            bash /tmp/setup-nemoclaw.sh "$AWS_REGION" "${OpenClawModel}" "$GATEWAY_TOKEN"
+            rm -f /tmp/setup-nemoclaw.sh
+          else
+            python3 -c "
+          import json
+          t='$GATEWAY_TOKEN'
           r='$AWS_REGION'
           m='${OpenClawModel}'
-          s='$SANDBOX_MODE'
           gw={'mode':'local','port':18789,'bind':'loopback','controlUi':{'enabled':True,'allowInsecureAuth':True},'auth':{'mode':'token','token':t}}
           mi={'id':m,'name':'Bedrock Model','input':['text','image'],'contextWindow':200000,'maxTokens':8192}
-          if s=='true':
-            prov={'litellm':{'baseUrl':'http://127.0.0.1:4000','api':'openai','auth':'none','models':[mi]}}
-            prim='litellm/'+m
-          else:
-            prov={'amazon-bedrock':{'baseUrl':'https://bedrock-runtime.'+r+'.amazonaws.com','api':'bedrock-converse-stream','auth':'aws-sdk','models':[mi]}}
-            prim='amazon-bedrock/'+m
+          prov={'amazon-bedrock':{'baseUrl':'https://bedrock-runtime.'+r+'.amazonaws.com','api':'bedrock-converse-stream','auth':'aws-sdk','models':[mi]}}
+          prim='amazon-bedrock/'+m
           cfg={'gateway':gw,'models':{'providers':prov},'agents':{'defaults':{'model':{'primary':prim}}}}
           json.dump(cfg,open('/home/ubuntu/.openclaw/openclaw.json','w'),indent=2)
           "
-          chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
-          if [ "${EnableSandbox}" = "true" ]; then
-            echo "Starting OpenClaw in NemoClaw sandbox..."
-            openshell sandbox upload openclaw-sandbox /home/ubuntu/.openclaw /home/ubuntu/.openclaw || true
-            printf '[Unit]\nDescription=OpenClaw in NemoClaw Sandbox\nAfter=litellm.service docker.service\nRequires=litellm.service docker.service\n[Service]\nType=simple\nUser=root\nExecStartPre=/usr/local/bin/openshell policy set openclaw-sandbox --policy /etc/nemoclaw/policies/strict-bedrock.yaml\nExecStart=/usr/local/bin/openshell sandbox connect openclaw-sandbox --exec "OPENAI_API_BASE=http://127.0.0.1:4000 OPENAI_API_KEY=dummy-key-for-litellm openclaw gateway"\nExecStartPost=/usr/local/bin/openshell forward start 18789 openclaw-sandbox -d\nExecStop=/usr/local/bin/openshell forward stop 18789 openclaw-sandbox\nRestart=always\nRestartSec=5\nEnvironment=HOME=/home/ubuntu\nEnvironment=AWS_REGION=%s\nEnvironment=AWS_DEFAULT_REGION=%s\n[Install]\nWantedBy=multi-user.target\n' "$AWS_REGION" "$AWS_REGION" > /etc/systemd/system/openclaw-nemoclaw.service
-            systemctl daemon-reload && systemctl enable openclaw-nemoclaw && systemctl start openclaw-nemoclaw
-          else
+            chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
             for i in $(seq 1 15); do
               if [ -S /run/user/1000/bus ]; then
                 echo "User systemd session ready"
