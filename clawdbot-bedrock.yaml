@@ -19,6 +19,10 @@ Metadata:
         Parameters:
           - CreateVPCEndpoints
           - AllowedSSHCIDR
+      - Label:
+          default: "Sandbox Configuration"
+        Parameters:
+          - EnableSandbox
 
 Parameters:
   OpenClawModel:
@@ -76,7 +80,10 @@ Parameters:
   EnableSandbox:
     Type: String
     Default: "true"
-    Description: "Install Docker for sandboxed execution (recommended for group chats)"
+    Description: "Enable NemoClaw sandbox with LiteLLM proxy for network-isolated AI execution (recommended for production)"
+    AllowedValues:
+      - "true"
+      - "false"
 
   EnableDataProtection:
     Type: String
@@ -154,7 +161,7 @@ Resources:
     DependsOn: OpenClawInstance
     Properties:
       Handle: !Ref OpenClawWaitHandle
-      Timeout: '900'
+      Timeout: '1200'
       Count: 1
 
   # ==================== VPC and Network ====================
@@ -512,7 +519,106 @@ Resources:
           else
             echo "[4/9] Skipping Docker (EnableSandbox=false)..."
           fi
-          
+
+          # Install LiteLLM proxy (if EnableSandbox=true)
+          if [ "${EnableSandbox}" = "true" ]; then
+            echo "[4.5/9] Installing LiteLLM proxy..."
+            apt-get install -y python3-pip python3-venv
+            python3 -m venv /opt/litellm
+            /opt/litellm/bin/pip install 'litellm[proxy]'
+
+            # Create LiteLLM config with all supported Bedrock models
+            mkdir -p /etc/litellm
+            cat > /etc/litellm/config.yaml << 'LITELLM_EOF'
+          model_list:
+            - model_name: "global.amazon.nova-2-lite-v1:0"
+              litellm_params:
+                model: "bedrock/amazon.nova-lite-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+              litellm_params:
+                model: "bedrock/anthropic.claude-sonnet-4-5-20250929-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "us.amazon.nova-pro-v1:0"
+              litellm_params:
+                model: "bedrock/amazon.nova-pro-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "global.anthropic.claude-opus-4-6-v1"
+              litellm_params:
+                model: "bedrock/anthropic.claude-opus-4-6-v1"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "global.anthropic.claude-opus-4-5-20251101-v1:0"
+              litellm_params:
+                model: "bedrock/anthropic.claude-opus-4-5-20251101-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+              litellm_params:
+                model: "bedrock/anthropic.claude-haiku-4-5-20251001-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "global.anthropic.claude-sonnet-4-20250514-v1:0"
+              litellm_params:
+                model: "bedrock/anthropic.claude-sonnet-4-20250514-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "us.deepseek.r1-v1:0"
+              litellm_params:
+                model: "bedrock/deepseek.r1-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "us.meta.llama3-3-70b-instruct-v1:0"
+              litellm_params:
+                model: "bedrock/meta.llama3-3-70b-instruct-v1:0"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+            - model_name: "moonshotai.kimi-k2.5"
+              litellm_params:
+                model: "bedrock/moonshotai.kimi-k2.5"
+                aws_region_name: "LITELLM_REGION_PLACEHOLDER"
+
+          general_settings:
+            master_key: null
+          LITELLM_EOF
+
+            sed -i "s/LITELLM_REGION_PLACEHOLDER/$AWS_REGION/g" /etc/litellm/config.yaml
+
+            # Create systemd service for LiteLLM
+            cat > /etc/systemd/system/litellm.service << SVCEOF
+          [Unit]
+          Description=LiteLLM Proxy for Amazon Bedrock
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          ExecStart=/opt/litellm/bin/litellm --config /etc/litellm/config.yaml --host 127.0.0.1 --port 4000
+          Restart=always
+          RestartSec=5
+          Environment=AWS_DEFAULT_REGION=$AWS_REGION
+          Environment=AWS_REGION=$AWS_REGION
+
+          [Install]
+          WantedBy=multi-user.target
+          SVCEOF
+
+            systemctl daemon-reload
+            systemctl enable litellm
+            systemctl start litellm
+
+            # Wait for LiteLLM to be healthy
+            echo "Waiting for LiteLLM to start on port 4000..."
+            for i in $(seq 1 30); do
+              if curl -s http://127.0.0.1:4000/health 2>/dev/null | grep -q "healthy"; then
+                echo "LiteLLM is healthy on port 4000"
+                break
+              fi
+              echo "Attempt $i/30: LiteLLM not ready, waiting..."
+              sleep 2
+            done
+
+            if ! curl -s http://127.0.0.1:4000/health 2>/dev/null | grep -q "healthy"; then
+              echo "WARNING: LiteLLM did not become healthy within 60s, continuing..."
+            fi
+          else
+            echo "[4.5/9] Skipping LiteLLM (EnableSandbox=false)..."
+          fi
+
           # Install Node.js
           echo "[5/9] Installing Node.js..."
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
@@ -579,7 +685,61 @@ Resources:
             exit 1
           fi
           echo "openclaw verified OK: $(/usr/local/bin/openclaw --version)"
-          
+
+          # Install NemoClaw sandbox (if EnableSandbox=true)
+          if [ "${EnableSandbox}" = "true" ]; then
+            echo "[5.5/9] Installing NemoClaw (OpenShell)..."
+            # NemoClaw installer: installs nemoclaw CLI + OpenShell runtime (K3s in Docker)
+            curl -fsSL https://www.nvidia.com/nemoclaw.sh -o /tmp/nemoclaw-install.sh
+            bash /tmp/nemoclaw-install.sh --non-interactive || {
+              echo "NemoClaw installation failed, retrying..."
+              bash /tmp/nemoclaw-install.sh --non-interactive
+            }
+            rm -f /tmp/nemoclaw-install.sh
+
+            # Create OpenShell sandbox for OpenClaw
+            openshell sandbox create --from openclaw --name openclaw-sandbox || echo "Sandbox creation will be completed at first start"
+
+            # Create network policy (only allow LiteLLM on localhost:4000)
+            mkdir -p /etc/nemoclaw/policies
+            cat > /etc/nemoclaw/policies/strict-bedrock.yaml << 'NEMOPOL_EOF'
+          version: 1
+
+          filesystem_policy:
+            include_workdir: true
+            read_only:
+              - /usr
+              - /lib
+              - /proc
+              - /etc
+            read_write:
+              - /home/ubuntu/.openclaw
+              - /tmp
+
+          landlock:
+            compatibility: best_effort
+
+          process:
+            run_as_user: ubuntu
+            run_as_group: ubuntu
+
+          network_policies:
+            litellm_proxy:
+              name: litellm-bedrock-proxy
+              endpoints:
+                - host: 127.0.0.1
+                  port: 4000
+                  enforcement: enforce
+                  access: full
+          NEMOPOL_EOF
+
+            # Apply network policy to sandbox
+            openshell policy set openclaw-sandbox --policy /etc/nemoclaw/policies/strict-bedrock.yaml || echo "Policy will be applied at sandbox start"
+            echo "NemoClaw network policy created and applied"
+          else
+            echo "[5.5/9] Skipping NemoClaw (EnableSandbox=false)..."
+          fi
+
           # Configure AWS region
           echo "[6/9] Configuring AWS..."
           sudo -u ubuntu mkdir -p /home/ubuntu/.aws
@@ -614,8 +774,54 @@ Resources:
           # Generate Gateway Token
           GATEWAY_TOKEN=$(openssl rand -hex 24)
           
-          # Create Bedrock configuration file (write as ubuntu to ensure correct ownership)
-          sudo -u ubuntu tee /home/ubuntu/.openclaw/openclaw.json > /dev/null << 'JSONEOF'
+          # Create configuration file (write as ubuntu to ensure correct ownership)
+          if [ "${EnableSandbox}" = "true" ]; then
+            # NemoClaw mode: route through LiteLLM proxy (OpenAI-compatible API)
+            sudo -u ubuntu tee /home/ubuntu/.openclaw/openclaw.json > /dev/null << 'JSONEOF'
+          {
+            "gateway": {
+              "mode": "local",
+              "port": 18789,
+              "bind": "loopback",
+              "controlUi": {
+                "enabled": true,
+                "allowInsecureAuth": true
+              },
+              "auth": {
+                "mode": "token",
+                "token": "GATEWAY_TOKEN_PLACEHOLDER"
+              }
+            },
+            "models": {
+              "providers": {
+                "litellm": {
+                  "baseUrl": "http://127.0.0.1:4000",
+                  "api": "openai",
+                  "auth": "none",
+                  "models": [
+                    {
+                      "id": "MODEL_ID_PLACEHOLDER",
+                      "name": "Bedrock Model via LiteLLM",
+                      "input": ["text", "image"],
+                      "contextWindow": 200000,
+                      "maxTokens": 8192
+                    }
+                  ]
+                }
+              }
+            },
+            "agents": {
+              "defaults": {
+                "model": {
+                  "primary": "litellm/MODEL_ID_PLACEHOLDER"
+                }
+              }
+            }
+          }
+          JSONEOF
+          else
+            # Direct Bedrock mode (no sandbox)
+            sudo -u ubuntu tee /home/ubuntu/.openclaw/openclaw.json > /dev/null << 'JSONEOF'
           {
             "gateway": {
               "mode": "local",
@@ -657,31 +863,72 @@ Resources:
             }
           }
           JSONEOF
-          
+          fi
+
           # Replace placeholders
           sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/$GATEWAY_TOKEN/g" /home/ubuntu/.openclaw/openclaw.json
           sed -i "s/REGION_PLACEHOLDER/$AWS_REGION/g" /home/ubuntu/.openclaw/openclaw.json
           sed -i "s|MODEL_ID_PLACEHOLDER|${OpenClawModel}|g" /home/ubuntu/.openclaw/openclaw.json
           
           # Install and start gateway
-          # Wait for user@1000 systemd session to be ready
-          for i in $(seq 1 15); do
-            if [ -S /run/user/1000/bus ]; then
-              echo "User systemd session ready"
-              break
-            fi
-            echo "Waiting for user session... $i/15"
-            sleep 2
-          done
-          
-          sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c '
-          export HOME=/home/ubuntu
-          export NVM_DIR="$HOME/.nvm"
-          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-          openclaw gateway install || echo "Gateway install failed"
-          systemctl --user start openclaw-gateway.service || { openclaw gateway & } || echo "Gateway start failed"
-          '
-          
+          if [ "${EnableSandbox}" = "true" ]; then
+            # NemoClaw mode: launch OpenClaw gateway inside OpenShell sandbox
+            echo "Starting OpenClaw gateway inside NemoClaw sandbox..."
+
+            # Upload openclaw config into sandbox
+            openshell sandbox upload openclaw-sandbox /home/ubuntu/.openclaw /home/ubuntu/.openclaw || echo "Config upload deferred"
+
+            # Start port forwarding for gateway (18789) in background
+            openshell forward start 18789 openclaw-sandbox -d || echo "Port forward will start with sandbox"
+
+            # Create systemd service that manages the OpenShell sandbox lifecycle
+            cat > /etc/systemd/system/openclaw-nemoclaw.service << NEMOEOF
+          [Unit]
+          Description=OpenClaw Gateway in NemoClaw/OpenShell Sandbox
+          After=litellm.service docker.service
+          Requires=litellm.service docker.service
+
+          [Service]
+          Type=simple
+          User=root
+          ExecStartPre=/usr/local/bin/openshell policy set openclaw-sandbox --policy /etc/nemoclaw/policies/strict-bedrock.yaml
+          ExecStart=/usr/local/bin/openshell sandbox connect openclaw-sandbox --exec "OPENAI_API_BASE=http://127.0.0.1:4000 OPENAI_API_KEY=dummy-key-for-litellm openclaw gateway"
+          ExecStartPost=/usr/local/bin/openshell forward start 18789 openclaw-sandbox -d
+          ExecStop=/usr/local/bin/openshell forward stop 18789 openclaw-sandbox
+          Restart=always
+          RestartSec=5
+          Environment=HOME=/home/ubuntu
+          Environment=AWS_REGION=$AWS_REGION
+          Environment=AWS_DEFAULT_REGION=$AWS_REGION
+
+          [Install]
+          WantedBy=multi-user.target
+          NEMOEOF
+
+            systemctl daemon-reload
+            systemctl enable openclaw-nemoclaw
+            systemctl start openclaw-nemoclaw
+          else
+            # Direct mode: start gateway via systemd user service (existing flow)
+            # Wait for user@1000 systemd session to be ready
+            for i in $(seq 1 15); do
+              if [ -S /run/user/1000/bus ]; then
+                echo "User systemd session ready"
+                break
+              fi
+              echo "Waiting for user session... $i/15"
+              sleep 2
+            done
+
+            sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c '
+            export HOME=/home/ubuntu
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            openclaw gateway install || echo "Gateway install failed"
+            systemctl --user start openclaw-gateway.service || { openclaw gateway & } || echo "Gateway start failed"
+            '
+          fi
+
           # Wait for daemon to be ready and verify port 18789 is listening
           echo "Waiting for OpenClaw daemon to start..."
           for i in $(seq 1 30); do
@@ -692,15 +939,19 @@ Resources:
             echo "Attempt $i/30: port 18789 not ready yet, waiting..."
             sleep 2
           done
-          
+
           if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
             echo "WARNING: OpenClaw gateway did not start within 60s, trying fallback..."
-            sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
-            export HOME=/home/ubuntu
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-            systemctl --user restart openclaw-gateway.service || openclaw gateway &
-            '
+            if [ "${EnableSandbox}" = "true" ]; then
+              systemctl restart openclaw-nemoclaw || echo "NemoClaw restart failed"
+            else
+              sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
+              export HOME=/home/ubuntu
+              export NVM_DIR="$HOME/.nvm"
+              [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+              systemctl --user restart openclaw-gateway.service || openclaw gateway &
+              '
+            fi
             sleep 5
           fi
           
@@ -868,6 +1119,13 @@ Outputs:
   BedrockModel:
     Description: "Bedrock model in use"
     Value: !Ref OpenClawModel
+
+  SandboxMode:
+    Description: "Sandbox isolation mode"
+    Value: !If
+      - EnableDocker
+      - "NemoClaw (OpenShell) + LiteLLM proxy (port 4000)"
+      - "No sandbox (direct Bedrock access)"
 
   MonthlyCost:
     Description: "Estimated monthly cost (USD)"

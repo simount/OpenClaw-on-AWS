@@ -424,6 +424,59 @@ aws cloudformation describe-stack-events \
   --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`]'
 ```
 
+### 12. NemoClaw / LiteLLM Issues (EnableSandbox=true)
+
+**Symptom**: Gateway won't start, model returns errors, or sandbox networking issues when `EnableSandbox=true`.
+
+**Check LiteLLM status**:
+```bash
+# Check LiteLLM service
+systemctl status litellm
+journalctl -u litellm --no-pager -n 50
+
+# Test LiteLLM health endpoint
+curl -s http://127.0.0.1:4000/health
+
+# Check if port 4000 is listening
+ss -tlnp | grep :4000
+```
+
+**Check NemoClaw sandbox status**:
+```bash
+# Check NemoClaw service
+systemctl status openclaw-nemoclaw
+journalctl -u openclaw-nemoclaw --no-pager -n 50
+
+# Verify NemoClaw network policy
+cat /etc/nemoclaw/policies/strict-bedrock.yaml
+```
+
+**Common fixes**:
+```bash
+# Restart LiteLLM
+sudo systemctl restart litellm
+
+# Restart NemoClaw + OpenClaw
+sudo systemctl restart openclaw-nemoclaw
+
+# Check LiteLLM config
+cat /etc/litellm/config.yaml
+
+# Verify OpenClaw is configured for LiteLLM
+cat /home/ubuntu/.openclaw/openclaw.json | grep -A5 "litellm"
+```
+
+**Network isolation test** (from inside sandbox):
+```bash
+# Should succeed:
+curl http://127.0.0.1:4000/health
+
+# Should fail (blocked by NemoClaw policy):
+curl https://example.com
+```
+
+---
+
 ## Diagnostic Scripts
 
 ### Complete Health Check

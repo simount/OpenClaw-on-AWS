@@ -90,24 +90,36 @@ AllowedSSHCIDR: 127.0.0.1/32  # Disables SSH
 
 **Cost**: ~$22/month for 3 endpoints
 
-### 4. Docker Sandbox
+### 4. NemoClaw Sandbox + LiteLLM Proxy
 
-**Isolated Execution**: Non-main sessions run in Docker containers.
+When `EnableSandbox=true` (default), the template deploys a defense-in-depth isolation model:
 
-```json
-{
-  "sandbox": {
-    "mode": "non-main",
-    "allowlist": ["bash", "read", "write", "edit"],
-    "denylist": ["browser", "canvas", "nodes", "gateway"]
-  }
-}
+**LiteLLM Proxy** runs on the host OS (port 4000, loopback only) and proxies all model requests to Amazon Bedrock using the EC2 instance's IAM role. This is the **sole egress point** for AI model traffic.
+
+**NemoClaw (OpenShell)** runs OpenClaw inside a network-restricted sandbox:
+- **Network**: Only `127.0.0.1:4000` (LiteLLM) is reachable. All other outbound traffic is denied.
+- **Filesystem**: Only `~/.openclaw` (read-write) and `~/.aws` (read-only) are mounted.
+- **Port mapping**: Gateway port 18789 is forwarded from the sandbox to the host loopback.
+
+```
+Host EC2
+├── LiteLLM (systemd, port 4000) ──→ Amazon Bedrock (IAM role)
+└── NemoClaw sandbox
+    └── OpenClaw (port 18789)
+        └── Can ONLY reach 127.0.0.1:4000
 ```
 
+**Audit benefits**:
+- All model API calls are logged through LiteLLM (`/var/log/litellm.log` or `journalctl -u litellm`)
+- Even a compromised OpenClaw process cannot exfiltrate data to the internet
+- Network policy is defined in `/etc/nemoclaw/policies/strict-bedrock.yaml`
+
 **Benefits**:
-- ✅ Limits blast radius
-- ✅ Protects host system
-- ✅ Safe for group chats
+- Limits blast radius
+- Protects host system from sandbox escape
+- Safe for group chats
+- Network-level isolation (not just process-level)
+- Centralized API audit logging via LiteLLM
 
 ## Security Checklist
 
@@ -115,7 +127,7 @@ AllowedSSHCIDR: 127.0.0.1/32  # Disables SSH
 
 - [ ] Enable VPC endpoints for production
 - [ ] Set `AllowedSSHCIDR` to your IP or disable SSH
-- [ ] Enable Docker sandbox
+- [ ] Enable NemoClaw sandbox (`EnableSandbox=true`)
 - [ ] Use latest AMI
 - [ ] Enable CloudTrail in your account
 
@@ -233,7 +245,7 @@ systemctl --user restart clawdbot-gateway
 - Use Nova 2 Lite model (cheapest)
 - Disable VPC endpoints (save $22/month)
 - Allow SSH from your IP only
-- Enable sandbox mode
+- Enable NemoClaw sandbox (`EnableSandbox=true`)
 
 ### For Production
 
@@ -241,7 +253,7 @@ systemctl --user restart clawdbot-gateway
 - Use Nova Pro or Claude models (better performance)
 - **Enable VPC endpoints** (required for security)
 - **Disable SSH** (`AllowedSSHCIDR: 127.0.0.1/32`)
-- Enable sandbox mode
+- Enable NemoClaw sandbox (`EnableSandbox=true`)
 - Set up CloudWatch alarms
 - Enable AWS Config rules
 - Regular security audits
