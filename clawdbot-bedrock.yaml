@@ -570,7 +570,7 @@ Resources:
           GATEWAY_TOKEN=$(openssl rand -hex 24)
           if [ "${EnableSandbox}" = "true" ]; then
             echo "Setting up NemoClaw + LiteLLM via external script..."
-            curl -fsSL https://raw.githubusercontent.com/simount/OpenClaw-on-AWS/feature/nemoclaw-litellm-integration/scripts/setup-nemoclaw-litellm.sh -o /tmp/setup-nemoclaw.sh
+            curl -fsSL https://raw.githubusercontent.com/simount/OpenClaw-on-AWS/feature%2Fnemoclaw-litellm-integration/scripts/setup-nemoclaw-litellm.sh -o /tmp/setup-nemoclaw.sh
             bash /tmp/setup-nemoclaw.sh "$AWS_REGION" "${OpenClawModel}" "$GATEWAY_TOKEN"
             rm -f /tmp/setup-nemoclaw.sh
           else
