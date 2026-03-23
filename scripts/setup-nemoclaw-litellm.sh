@@ -3,6 +3,7 @@
 # Called from UserData when EnableSandbox=true
 # Arguments: $1=AWS_REGION $2=OpenClawModel $3=GATEWAY_TOKEN
 set -e
+export HOME="${HOME:-/root}"
 AWS_REGION="${1:?Region required}"
 MODEL="${2:?Model required}"
 GATEWAY_TOKEN="${3:?Token required}"
