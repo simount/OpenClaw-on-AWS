@@ -615,7 +615,7 @@ Resources:
           if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
             echo "WARNING: OpenClaw gateway did not start within 60s, trying fallback..."
             if [ "${EnableSandbox}" = "true" ]; then
-              systemctl restart openshell-forward || echo "Port forward restart failed"
+              systemctl restart openclaw-gateway || echo "Gateway restart failed"
             else
               sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
               export HOME=/home/ubuntu

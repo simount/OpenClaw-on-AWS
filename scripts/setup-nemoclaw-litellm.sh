@@ -124,46 +124,62 @@ openshell inference set \
   --no-verify \
   2>&1 || echo "Inference route set failed"
 
-# ── Step 5: Set up persistent port forward ────────────────────────────
-echo "[7.5/9] Setting up port forwarding..."
+# ── Step 5: Host-side Control UI gateway ──────────────────────────────
+# NemoClaw sandbox handles agent execution (messaging, CLI, tools).
+# Host gateway provides the web management UI (auth=none, SSM-isolated).
+echo "[7.5/9] Setting up host Control UI gateway..."
+sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
+python3 << PYEOF
+import json
+t='$GATEWAY_TOKEN'
+m='$MODEL'
+cfg={
+  "gateway":{
+    "mode":"local",
+    "port":18789,
+    "bind":"loopback",
+    "controlUi":{"enabled":True,"allowInsecureAuth":True},
+    "auth":{"mode":"none"}
+  },
+  "models":{
+    "providers":{
+      "litellm":{
+        "baseUrl":"http://127.0.0.1:4000",
+        "api":"openai",
+        "auth":"none",
+        "models":[{"id":m,"name":"Bedrock Model","input":["text","image"],"contextWindow":200000,"maxTokens":8192}]
+      }
+    }
+  },
+  "agents":{
+    "defaults":{
+      "model":{"primary":"litellm/"+m}
+    }
+  }
+}
+json.dump(cfg,open("/home/ubuntu/.openclaw/openclaw.json","w"),indent=2)
+PYEOF
+chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
 
-cat > /usr/local/bin/openshell-forward-wrapper.sh << 'FWDEOF'
-#!/bin/bash
-export HOME=/root
-export PATH="/root/.local/bin:$PATH"
-SANDBOX="$1"
-# Start the forward (spawns an SSH tunnel child process)
-/usr/local/bin/openshell forward start 18789 "$SANDBOX" &
-FWD_PID=$!
-# Wait for the port to be ready
-for i in $(seq 1 30); do
-  if ss -tlnp | grep -q :18789; then break; fi
-  sleep 1
-done
-# Keep alive: monitor port, exit if tunnel dies
-while ss -tlnp | grep -q :18789; do
-  sleep 10
-done
-FWDEOF
-chmod +x /usr/local/bin/openshell-forward-wrapper.sh
-
-cat > /etc/systemd/system/openshell-forward.service << EOF
+cat > /etc/systemd/system/openclaw-gateway.service << EOF
 [Unit]
-Description=OpenShell Port Forward 18789
-After=network.target docker.service
-StartLimitIntervalSec=60
-StartLimitBurst=10
+Description=OpenClaw Gateway (Control UI)
+After=litellm.service
+Wants=litellm.service
 [Service]
 Type=simple
-Environment=HOME=/root
-Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/usr/local/bin/openshell-forward-wrapper.sh $SANDBOX_NAME
+User=ubuntu
+ExecStart=/usr/local/bin/openclaw gateway
 Restart=always
 RestartSec=5
-KillMode=process
+Environment=HOME=/home/ubuntu
+Environment=AWS_REGION=$AWS_REGION
+Environment=AWS_DEFAULT_REGION=$AWS_REGION
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload && systemctl enable openshell-forward && systemctl start openshell-forward
+systemctl daemon-reload && systemctl enable openclaw-gateway && systemctl start openclaw-gateway
 
 echo "NemoClaw + LiteLLM setup complete"
+echo "  Agent: NemoClaw sandbox (messaging, CLI, tools)"
+echo "  Control UI: Host gateway on port 18789 (auth=none)"
