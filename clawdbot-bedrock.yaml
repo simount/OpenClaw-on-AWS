@@ -80,7 +80,7 @@ Parameters:
   EnableSandbox:
     Type: String
     Default: "true"
-    Description: "Enable NemoClaw sandbox with LiteLLM proxy for network-isolated AI execution (recommended for production)"
+    Description: "Enable NemoClaw sandbox with LiteLLM proxy for sandboxed AI execution (recommended for production)"
     AllowedValues:
       - "true"
       - "false"
@@ -615,7 +615,7 @@ Resources:
           if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
             echo "WARNING: OpenClaw gateway did not start within 60s, trying fallback..."
             if [ "${EnableSandbox}" = "true" ]; then
-              systemctl restart openclaw-nemoclaw || echo "NemoClaw restart failed"
+              systemctl restart openshell-forward || echo "Port forward restart failed"
             else
               sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
               export HOME=/home/ubuntu
@@ -709,7 +709,7 @@ Outputs:
     Description: "Sandbox isolation mode"
     Value: !If
       - EnableDocker
-      - "NemoClaw (OpenShell) + LiteLLM proxy (port 4000)"
+      - "NemoClaw sandbox + LiteLLM proxy (port 4000) -> Bedrock"
       - "No sandbox (direct Bedrock access)"
 
   MonthlyCost:
