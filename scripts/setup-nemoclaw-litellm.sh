@@ -2,7 +2,7 @@
 # NemoClaw + LiteLLM setup script for OpenClaw on AWS
 # Called from UserData when EnableSandbox=true
 # Arguments: $1=AWS_REGION $2=OpenClawModel $3=GATEWAY_TOKEN
-set -e
+set -euo pipefail
 export HOME="${HOME:-/root}"
 AWS_REGION="${1:?Region required}"
 MODEL="${2:?Model required}"
@@ -58,16 +58,9 @@ for i in $(seq 1 30); do
   sleep 2
 done
 
-# ── Step 2: Install NemoClaw ──────────────────────────────────────────
-echo "[5.5/9] Installing NemoClaw..."
-curl -fsSL https://www.nvidia.com/nemoclaw.sh -o /tmp/nc.sh
-bash /tmp/nc.sh --non-interactive || bash /tmp/nc.sh --non-interactive
-rm -f /tmp/nc.sh
-
-# ── Step 3: Write OpenClaw config for the sandbox ─────────────────────
-# This config is placed in $HOME/.openclaw/ BEFORE nemoclaw onboard
-# so that nemoclaw copies it into the sandbox.
-# Key: allowedOrigins for SSM port forwarding, auth token for pairing.
+# ── Step 2: Write OpenClaw config BEFORE NemoClaw install ─────────────
+# nemoclaw onboard copies $HOME/.openclaw/openclaw.json into the sandbox.
+echo "[5/9] Pre-staging OpenClaw config..."
 mkdir -p /root/.openclaw
 python3 -c "
 import json
@@ -88,40 +81,40 @@ cfg={
 json.dump(cfg,open('/root/.openclaw/openclaw.json','w'),indent=2)
 "
 
-# ── Step 4: Onboard NemoClaw (creates sandbox + gateway) ─────────────
-echo "[6/9] Running NemoClaw onboard..."
-nemoclaw onboard --non-interactive
+# ── Step 3: Install NemoClaw (--non-interactive runs onboard automatically) ──
+echo "[6/9] Installing NemoClaw (includes onboard)..."
+curl -fsSL https://www.nvidia.com/nemoclaw.sh -o /tmp/nc.sh
+bash /tmp/nc.sh --non-interactive || bash /tmp/nc.sh --non-interactive
+rm -f /tmp/nc.sh
 
-# ── Step 5: Configure inference to use LiteLLM via OpenShell ──────────
-# Register LiteLLM as an OpenAI-compatible provider.
-# Use host.openshell.internal so sandbox can reach the host's LiteLLM.
-echo "[7/9] Configuring inference provider..."
+# Add nemoclaw/openshell to PATH for subsequent commands
+export PATH="/root/.local/bin:$PATH"
+
+# ── Step 4: Configure inference to use LiteLLM via OpenShell ──────────
+# The sandbox reaches LiteLLM on the host via host.openshell.internal.
+echo "[7/9] Configuring LiteLLM inference provider..."
 openshell provider create \
   --name litellm-bedrock \
   --type openai \
   --credential OPENAI_API_KEY=sk-dummy \
   --config OPENAI_BASE_URL=http://host.openshell.internal:4000/v1 \
-  2>&1 || echo "Provider may already exist"
+  || echo "Provider may already exist"
 
 openshell inference set \
   --provider litellm-bedrock \
   --model "$MODEL" \
   --no-verify \
-  2>&1 || echo "Inference route set failed"
+  || echo "Inference route set failed"
 
-# ── Step 6: Set up persistent port forward ────────────────────────────
+# ── Step 5: Set up persistent port forward ────────────────────────────
 echo "[7.5/9] Setting up port forwarding..."
-SANDBOX_NAME=$(openshell sandbox list --json 2>/dev/null | python3 -c "
-import sys,json
-try:
-  data=json.load(sys.stdin)
-  print(data[0]['name'] if data else 'my-assistant')
-except: print('my-assistant')
-" 2>/dev/null || echo "my-assistant")
+SANDBOX_NAME=$(openshell sandbox list 2>/dev/null | awk 'NR==2{print $1}' || echo "my-assistant")
+[ -z "$SANDBOX_NAME" ] && SANDBOX_NAME="my-assistant"
 
 cat > /usr/local/bin/openshell-forward-wrapper.sh << 'FWDEOF'
 #!/bin/bash
 export HOME=/root
+export PATH="/root/.local/bin:$PATH"
 SANDBOX="$1"
 # Start the forward (spawns an SSH tunnel child process)
 /usr/local/bin/openshell forward start 18789 "$SANDBOX" &
@@ -146,6 +139,8 @@ StartLimitIntervalSec=60
 StartLimitBurst=10
 [Service]
 Type=simple
+Environment=HOME=/root
+Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/openshell-forward-wrapper.sh $SANDBOX_NAME
 Restart=always
 RestartSec=5
