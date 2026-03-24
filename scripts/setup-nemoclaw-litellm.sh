@@ -145,8 +145,7 @@ cfg={
     "providers":{
       "litellm":{
         "baseUrl":"http://127.0.0.1:4000",
-        "api":"openai",
-        "auth":"none",
+        "api":"openai-completions",
         "models":[{"id":m,"name":"Bedrock Model","input":["text","image"],"contextWindow":200000,"maxTokens":8192}]
       }
     }
