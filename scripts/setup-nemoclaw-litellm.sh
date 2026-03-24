@@ -2,7 +2,7 @@
 # NemoClaw + LiteLLM setup script for OpenClaw on AWS
 # Called from UserData when EnableSandbox=true
 # Arguments: $1=AWS_REGION $2=OpenClawModel $3=GATEWAY_TOKEN
-set -euo pipefail
+set -uo pipefail
 export HOME="${HOME:-/root}"
 AWS_REGION="${1:?Region required}"
 MODEL="${2:?Model required}"
@@ -82,13 +82,31 @@ json.dump(cfg,open('/root/.openclaw/openclaw.json','w'),indent=2)
 "
 
 # ── Step 3: Install NemoClaw (--non-interactive runs onboard automatically) ──
+# Note: NIM API key is not provided, so onboard stops at [4/7] "Configuring inference".
+# This is expected — we configure inference ourselves via openshell provider/inference.
 echo "[6/9] Installing NemoClaw (includes onboard)..."
 curl -fsSL https://www.nvidia.com/nemoclaw.sh -o /tmp/nc.sh
 bash /tmp/nc.sh --non-interactive || bash /tmp/nc.sh --non-interactive
 rm -f /tmp/nc.sh
 
-# Add nemoclaw/openshell to PATH for subsequent commands
+# Add NVM node to PATH (NemoClaw installer installs its own node via nvm)
+NVM_NODE=$(find /root/.nvm/versions/node -name node -type f 2>/dev/null | head -1)
+if [ -n "$NVM_NODE" ]; then
+  export PATH="$(dirname "$NVM_NODE"):$PATH"
+fi
 export PATH="/root/.local/bin:$PATH"
+
+# Wait for sandbox to be ready (nemoclaw onboard creates it)
+echo "Waiting for sandbox to be ready..."
+for i in $(seq 1 30); do
+  SANDBOX_NAME=$(openshell sandbox list 2>/dev/null | awk 'NR==2{print $1}')
+  if [ -n "$SANDBOX_NAME" ]; then
+    echo "Sandbox ready: $SANDBOX_NAME"
+    break
+  fi
+  sleep 5
+done
+[ -z "$SANDBOX_NAME" ] && SANDBOX_NAME="my-assistant"
 
 # ── Step 4: Configure inference to use LiteLLM via OpenShell ──────────
 # The sandbox reaches LiteLLM on the host via host.openshell.internal.
@@ -98,18 +116,16 @@ openshell provider create \
   --type openai \
   --credential OPENAI_API_KEY=sk-dummy \
   --config OPENAI_BASE_URL=http://host.openshell.internal:4000/v1 \
-  || echo "Provider may already exist"
+  2>&1 || echo "Provider create failed (may already exist)"
 
 openshell inference set \
   --provider litellm-bedrock \
   --model "$MODEL" \
   --no-verify \
-  || echo "Inference route set failed"
+  2>&1 || echo "Inference route set failed"
 
 # ── Step 5: Set up persistent port forward ────────────────────────────
 echo "[7.5/9] Setting up port forwarding..."
-SANDBOX_NAME=$(openshell sandbox list 2>/dev/null | awk 'NR==2{print $1}' || echo "my-assistant")
-[ -z "$SANDBOX_NAME" ] && SANDBOX_NAME="my-assistant"
 
 cat > /usr/local/bin/openshell-forward-wrapper.sh << 'FWDEOF'
 #!/bin/bash
