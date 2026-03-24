@@ -86,7 +86,7 @@ json.dump(cfg,open('/root/.openclaw/openclaw.json','w'),indent=2)
 # This is expected — we configure inference ourselves via openshell provider/inference.
 echo "[6/9] Installing NemoClaw (includes onboard)..."
 curl -fsSL https://www.nvidia.com/nemoclaw.sh -o /tmp/nc.sh
-bash /tmp/nc.sh --non-interactive || bash /tmp/nc.sh --non-interactive
+bash /tmp/nc.sh --non-interactive || echo "NemoClaw install completed with warnings (expected without NVIDIA_API_KEY)"
 rm -f /tmp/nc.sh
 
 # Add NVM node to PATH (NemoClaw installer installs its own node via nvm)
