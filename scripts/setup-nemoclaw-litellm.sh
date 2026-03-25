@@ -60,11 +60,11 @@ done
 
 # ── Step 2: Write OpenClaw config BEFORE NemoClaw install ─────────────
 # nemoclaw onboard copies $HOME/.openclaw/openclaw.json into the sandbox.
+# Use auth.mode=none since gateway is only accessible via SSM port forwarding.
 echo "[5/9] Pre-staging OpenClaw config..."
 mkdir -p /root/.openclaw
 python3 -c "
 import json
-t='$GATEWAY_TOKEN'
 cfg={
   'gateway':{
     'mode':'local',
@@ -75,7 +75,7 @@ cfg={
       'allowInsecureAuth':True,
       'allowedOrigins':['http://localhost:18789','http://127.0.0.1:18789']
     },
-    'auth':{'mode':'token','token':t}
+    'auth':{'mode':'none'}
   }
 }
 json.dump(cfg,open('/root/.openclaw/openclaw.json','w'),indent=2)
@@ -124,61 +124,96 @@ openshell inference set \
   --no-verify \
   2>&1 || echo "Inference route set failed"
 
-# ── Step 5: Host-side Control UI gateway ──────────────────────────────
-# NemoClaw sandbox handles agent execution (messaging, CLI, tools).
-# Host gateway provides the web management UI (auth=none, SSM-isolated).
-echo "[7.5/9] Setting up host Control UI gateway..."
-sudo -u ubuntu mkdir -p /home/ubuntu/.openclaw
-python3 << PYEOF
-import json
-t='$GATEWAY_TOKEN'
-m='$MODEL'
-cfg={
-  "gateway":{
-    "mode":"local",
-    "port":18789,
-    "bind":"loopback",
-    "controlUi":{"enabled":True,"allowInsecureAuth":True},
-    "auth":{"mode":"none"}
-  },
-  "models":{
-    "providers":{
-      "litellm":{
-        "baseUrl":"http://127.0.0.1:4000",
-        "api":"openai-completions",
-        "models":[{"id":m,"name":"Bedrock Model","input":["text","image"],"contextWindow":200000,"maxTokens":8192}]
-      }
-    }
-  },
-  "agents":{
-    "defaults":{
-      "model":{"primary":"litellm/"+m}
-    }
-  }
-}
-json.dump(cfg,open("/home/ubuntu/.openclaw/openclaw.json","w"),indent=2)
-PYEOF
-chown ubuntu:ubuntu /home/ubuntu/.openclaw/openclaw.json
+# ── Step 5: Update sandbox OpenClaw + patch config + port forward ─────
+echo "[7.5/9] Updating sandbox OpenClaw and configuring access..."
 
-cat > /etc/systemd/system/openclaw-gateway.service << EOF
+# 5a. Update OpenClaw inside the sandbox to latest version.
+#     The NemoClaw image ships 2026.3.11 which has a device identity bug in
+#     the Control UI. Updating to latest fixes this when auth.mode=none.
+openshell sandbox ssh-config "$SANDBOX_NAME" > /tmp/ssh-sandbox.conf
+echo "Updating OpenClaw inside sandbox to latest..."
+ssh -F /tmp/ssh-sandbox.conf "openshell-$SANDBOX_NAME" \
+  "npm install -g openclaw@latest 2>&1 | tail -3" || echo "Sandbox OpenClaw update failed (non-fatal)"
+
+# 5b. Patch sandbox config to auth.mode=none via overlayfs.
+#     NemoClaw onboard generates its own auth config, so we patch after the fact.
+echo "Patching sandbox config for auth.mode=none..."
+python3 << 'PYEOF'
+import json, glob
+patterns = [
+    "/var/lib/docker/volumes/openshell-cluster-nemoclaw/_data/agent/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/*/fs/sandbox/.openclaw/openclaw.json",
+    "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/*/fs/sandbox/.openclaw/openclaw.json"
+]
+patched = 0
+for pattern in patterns:
+    for p in glob.glob(pattern):
+        try:
+            cfg = json.load(open(p))
+            if "gateway" in cfg:
+                cfg["gateway"]["auth"] = {"mode": "none"}
+                json.dump(cfg, open(p, "w"), indent=2)
+                patched += 1
+        except Exception as e:
+            print(f"Skip {p}: {e}")
+print(f"Patched {patched} config file(s)")
+PYEOF
+
+# 5c. Restart gateway inside sandbox to pick up new binary + config.
+echo "Restarting gateway inside sandbox..."
+ssh -F /tmp/ssh-sandbox.conf "openshell-$SANDBOX_NAME" \
+  "openclaw gateway stop 2>/dev/null; nohup openclaw gateway > /tmp/gw.log 2>&1 &" || true
+sleep 5
+
+# 5d. Set up persistent port forward (host:18789 -> sandbox:18789).
+cat > /usr/local/bin/openshell-forward-wrapper.sh << 'FWDEOF'
+#!/bin/bash
+export HOME=/root
+export PATH="/root/.local/bin:$PATH"
+SANDBOX="$1"
+/usr/local/bin/openshell forward start 18789 "$SANDBOX" &
+FWD_PID=$!
+sleep 3
+# Wait for port to become available
+for i in $(seq 1 30); do
+  if ss -tlnp | grep -q :18789; then
+    break
+  fi
+  sleep 1
+done
+# Keep alive by monitoring the port
+while ss -tlnp | grep -q :18789; do
+  sleep 10
+done
+FWDEOF
+chmod +x /usr/local/bin/openshell-forward-wrapper.sh
+
+cat > /etc/systemd/system/openshell-forward.service << EOF
 [Unit]
-Description=OpenClaw Gateway (Control UI)
-After=litellm.service
-Wants=litellm.service
+Description=OpenShell Port Forward 18789 to sandbox
+After=network.target docker.service
+StartLimitIntervalSec=0
 [Service]
 Type=simple
-User=ubuntu
-ExecStart=/usr/local/bin/openclaw gateway
+ExecStart=/usr/local/bin/openshell-forward-wrapper.sh $SANDBOX_NAME
 Restart=always
 RestartSec=5
-Environment=HOME=/home/ubuntu
-Environment=AWS_REGION=$AWS_REGION
-Environment=AWS_DEFAULT_REGION=$AWS_REGION
+KillMode=process
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload && systemctl enable openclaw-gateway && systemctl start openclaw-gateway
+systemctl daemon-reload && systemctl enable openshell-forward && systemctl start openshell-forward
+
+# Wait for port forward to be ready
+echo "Waiting for port forward..."
+for i in $(seq 1 15); do
+  if ss -tlnp | grep -q :18789; then
+    echo "Port 18789 forwarded to sandbox"
+    break
+  fi
+  sleep 2
+done
 
 echo "NemoClaw + LiteLLM setup complete"
-echo "  Agent: NemoClaw sandbox (messaging, CLI, tools)"
-echo "  Control UI: Host gateway on port 18789 (auth=none)"
+echo "  Agent + Control UI: NemoClaw sandbox ($SANDBOX_NAME)"
+echo "  Inference: LiteLLM (port 4000) -> Bedrock"
+echo "  Access: SSM port forwarding -> port 18789"

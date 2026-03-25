@@ -383,7 +383,7 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       AvailabilityZone: !Select [0, !GetAZs '']
-      Size: 50
+      Size: 30
       VolumeType: gp3
       Encrypted: true
       Tags:
@@ -397,7 +397,7 @@ Resources:
     UpdateReplacePolicy: Delete
     Properties:
       AvailabilityZone: !Select [0, !GetAZs '']
-      Size: 50
+      Size: 30
       VolumeType: gp3
       Encrypted: true
       Tags:
@@ -426,7 +426,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 50
+            VolumeSize: 30
             VolumeType: gp3
             DeleteOnTermination: true
       UserData:
@@ -496,6 +496,7 @@ Resources:
             systemctl enable docker && systemctl start docker
             usermod -aG docker ubuntu
           fi
+          if [ "${EnableSandbox}" != "true" ]; then
           echo "[5/9] Installing Node.js..."
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
           cd ~
@@ -548,6 +549,7 @@ Resources:
             exit 1
           fi
           echo "openclaw verified OK: $(/usr/local/bin/openclaw --version)"
+          fi
           echo "[6/9] Configuring AWS..."
           sudo -u ubuntu mkdir -p /home/ubuntu/.aws
           sudo -u ubuntu bash -c "printf '[default]\nregion = %s\noutput = json\n' \"$AWS_REGION\" > /home/ubuntu/.aws/config"
@@ -627,16 +629,25 @@ Resources:
             sleep 5
           fi
           echo "[8.5/9] Enabling messaging channels..."
-          sudo -H -u ubuntu bash -c '
-          export HOME=/home/ubuntu
-          export NVM_DIR="$HOME/.nvm"
-          [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-          openclaw plugins enable whatsapp || echo "WhatsApp plugin enable failed"
-          openclaw plugins enable telegram || echo "Telegram plugin enable failed"
-          openclaw plugins enable discord || echo "Discord plugin enable failed"
-          openclaw plugins enable slack || echo "Slack plugin enable failed"
-          npm install -g openclaw-feishu@latest --timeout=60000 2>/dev/null || echo "Feishu plugin install skipped"
-          '
+          if [ "${EnableSandbox}" = "true" ]; then
+            export HOME=/root
+            openshell sandbox ssh-config "$SANDBOX_NAME" > /tmp/ssh-sandbox.conf 2>/dev/null || openshell sandbox ssh-config my-assistant > /tmp/ssh-sandbox.conf 2>/dev/null || true
+            SANDBOX_HOST="openshell-${SANDBOX_NAME:-my-assistant}"
+            for plugin in whatsapp telegram discord slack; do
+              ssh -F /tmp/ssh-sandbox.conf "$SANDBOX_HOST" "openclaw plugins enable $plugin" 2>&1 || echo "$plugin plugin enable failed"
+            done
+          else
+            sudo -H -u ubuntu bash -c '
+            export HOME=/home/ubuntu
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            openclaw plugins enable whatsapp || echo "WhatsApp plugin enable failed"
+            openclaw plugins enable telegram || echo "Telegram plugin enable failed"
+            openclaw plugins enable discord || echo "Discord plugin enable failed"
+            openclaw plugins enable slack || echo "Slack plugin enable failed"
+            npm install -g openclaw-feishu@latest --timeout=60000 2>/dev/null || echo "Feishu plugin install skipped"
+            '
+          fi
           sudo -u ubuntu cat > /home/ubuntu/.openclaw/SOUL.md << 'SOUL_EOF'
           You are an AI assistant on AWS with Bedrock. Be helpful, concise, friendly.
           On first message, greet the user and offer to connect WhatsApp, Telegram, Discord, or Slack via the Web UI (Channels > Add Channel). Guide them step by step.
@@ -717,7 +728,7 @@ Outputs:
     Value: !Sub
       - |
         EC2 (${InstanceType}): ~$20-40 (Graviton instances 20% cheaper)
-        EBS (50GB): ~$4.00
+        EBS (30GB): ~$2.40
         VPC Endpoints: ${EndpointCost}
         Bedrock: Pay-per-use
         Total: ~${TotalCost}/month
