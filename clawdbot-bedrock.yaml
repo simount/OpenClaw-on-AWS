@@ -632,7 +632,8 @@ Resources:
           if [ "${EnableSandbox}" = "true" ]; then
             export HOME=/root
             openshell sandbox ssh-config "$SANDBOX_NAME" > /tmp/ssh-sandbox.conf 2>/dev/null || openshell sandbox ssh-config my-assistant > /tmp/ssh-sandbox.conf 2>/dev/null || true
-            SANDBOX_HOST="openshell-${SANDBOX_NAME:-my-assistant}"
+            if [ -z "$SANDBOX_NAME" ]; then SANDBOX_NAME="my-assistant"; fi
+            SANDBOX_HOST="openshell-$SANDBOX_NAME"
             for plugin in whatsapp telegram discord slack; do
               ssh -F /tmp/ssh-sandbox.conf "$SANDBOX_HOST" "openclaw plugins enable $plugin" 2>&1 || echo "$plugin plugin enable failed"
             done
