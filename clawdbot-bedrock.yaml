@@ -486,6 +486,10 @@ Resources:
           echo "[3/9] Configuring SSM Agent..."
           snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
           if [ "${EnableSandbox}" = "true" ]; then
+            echo "[3.5/9] Setting inotify limits for OpenShell k3s..."
+            sysctl -w fs.inotify.max_user_instances=512
+            sysctl -w fs.inotify.max_user_watches=524288
+            printf 'fs.inotify.max_user_instances=512\nfs.inotify.max_user_watches=524288\n' > /etc/sysctl.d/99-openshell.conf
             echo "[4/9] Installing Docker..."
             install -m 0755 -d /etc/apt/keyrings
             curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -617,7 +621,7 @@ Resources:
           if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
             echo "WARNING: OpenClaw gateway did not start within 60s, trying fallback..."
             if [ "${EnableSandbox}" = "true" ]; then
-              systemctl restart openclaw-gateway || echo "Gateway restart failed"
+              systemctl restart openshell-forward || echo "SSH forward restart failed"
             else
               sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 bash -c '
               export HOME=/home/ubuntu
@@ -628,14 +632,14 @@ Resources:
             fi
             sleep 5
           fi
+          SANDBOX_NAME="openclaw"
           echo "[8.5/9] Enabling messaging channels..."
           if [ "${EnableSandbox}" = "true" ]; then
             export HOME=/root
-            openshell sandbox ssh-config "$SANDBOX_NAME" > /tmp/ssh-sandbox.conf 2>/dev/null || openshell sandbox ssh-config my-assistant > /tmp/ssh-sandbox.conf 2>/dev/null || true
-            if [ -z "$SANDBOX_NAME" ]; then SANDBOX_NAME="my-assistant"; fi
             SANDBOX_HOST="openshell-$SANDBOX_NAME"
             for plugin in whatsapp telegram discord slack; do
-              ssh -F /tmp/ssh-sandbox.conf "$SANDBOX_HOST" "openclaw plugins enable $plugin" 2>&1 || echo "$plugin plugin enable failed"
+              sudo -u ubuntu ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                "$SANDBOX_HOST" "openclaw plugins enable $plugin" 2>&1 || echo "$plugin plugin enable failed"
             done
           else
             sudo -H -u ubuntu bash -c '
@@ -649,11 +653,17 @@ Resources:
             npm install -g openclaw-feishu@latest --timeout=60000 2>/dev/null || echo "Feishu plugin install skipped"
             '
           fi
-          sudo -u ubuntu cat > /home/ubuntu/.openclaw/SOUL.md << 'SOUL_EOF'
+          cat > /tmp/SOUL.md << 'SOUL_EOF'
           You are an AI assistant on AWS with Bedrock. Be helpful, concise, friendly.
           On first message, greet the user and offer to connect WhatsApp, Telegram, Discord, or Slack via the Web UI (Channels > Add Channel). Guide them step by step.
           SOUL_EOF
-          chown ubuntu:ubuntu /home/ubuntu/.openclaw/SOUL.md
+          if [ "${EnableSandbox}" = "true" ]; then
+            cat /tmp/SOUL.md | sudo -u ubuntu ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "openshell-$SANDBOX_NAME" "tee /sandbox/.openclaw/SOUL.md > /dev/null" 2>/dev/null || true
+          else
+            cp /tmp/SOUL.md /home/ubuntu/.openclaw/SOUL.md
+            chown ubuntu:ubuntu /home/ubuntu/.openclaw/SOUL.md
+          fi
           STACK_NAME="${AWS::StackName}"
           aws ssm put-parameter \
             --name "/openclaw/$STACK_NAME/gateway-token" \
@@ -664,7 +674,7 @@ Resources:
           unset GATEWAY_TOKEN
           echo "$INSTANCE_ID" > /home/ubuntu/.openclaw/instance_id.txt
           echo "$AWS_REGION" > /home/ubuntu/.openclaw/region.txt
-          printf '#!/bin/bash\nT=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")\nI=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/instance-id)\nR=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/placement/region)\nS=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$I" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $R)\nK=$(aws ssm get-parameter --name "/openclaw/$S/gateway-token" --with-decryption --query Parameter.Value --output text --region $R)\necho "Run: aws ssm start-session --target $I --region $R --document-name AWS-StartPortForwardingSession --parameters \\x27{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}\\x27"\necho "Open: http://localhost:18789/?token=$K"\n' > /home/ubuntu/ssm-portforward.sh
+          printf '#!/bin/bash\nT=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")\nI=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/instance-id)\nR=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/placement/region)\nS=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$I" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $R)\nK=$(aws ssm get-parameter --name "/openclaw/$S/gateway-token" --with-decryption --query Parameter.Value --output text --region $R)\necho "Run: aws ssm start-session --target $I --region $R --document-name AWS-StartPortForwardingSession --parameters \\x27{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}\\x27"\necho "Open: http://localhost:18789/#token=$K"\n' > /home/ubuntu/ssm-portforward.sh
           chmod +x /home/ubuntu/ssm-portforward.sh && chown ubuntu:ubuntu /home/ubuntu/ssm-portforward.sh
           echo "[9/9] Signaling CloudFormation..."
           echo "SUCCESS" > /home/ubuntu/.openclaw/setup_status.txt
