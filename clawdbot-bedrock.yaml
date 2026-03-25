@@ -383,7 +383,7 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       AvailabilityZone: !Select [0, !GetAZs '']
-      Size: 30
+      Size: 50
       VolumeType: gp3
       Encrypted: true
       Tags:
@@ -397,7 +397,7 @@ Resources:
     UpdateReplacePolicy: Delete
     Properties:
       AvailabilityZone: !Select [0, !GetAZs '']
-      Size: 30
+      Size: 50
       VolumeType: gp3
       Encrypted: true
       Tags:
@@ -426,7 +426,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 30
+            VolumeSize: 50
             VolumeType: gp3
             DeleteOnTermination: true
       UserData:
@@ -717,7 +717,7 @@ Outputs:
     Value: !Sub
       - |
         EC2 (${InstanceType}): ~$20-40 (Graviton instances 20% cheaper)
-        EBS (30GB): ~$2.40
+        EBS (50GB): ~$4.00
         VPC Endpoints: ${EndpointCost}
         Bedrock: Pay-per-use
         Total: ~${TotalCost}/month
