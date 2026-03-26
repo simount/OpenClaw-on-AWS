@@ -609,16 +609,21 @@ Resources:
             systemctl --user start openclaw-gateway.service || { openclaw gateway & } || echo "Gateway start failed"
             '
           fi
-          echo "Waiting for OpenClaw daemon to start..."
+          if [ "${EnableSandbox}" = "true" ]; then
+            LISTEN_PORT=18790
+          else
+            LISTEN_PORT=18789
+          fi
+          echo "Waiting for OpenClaw daemon to start on port $LISTEN_PORT..."
           for i in $(seq 1 30); do
-            if ss -tlnp 2>/dev/null | grep -q ':18789'; then
-              echo "OpenClaw daemon is up on port 18789"
+            if ss -tlnp 2>/dev/null | grep -q ":$LISTEN_PORT"; then
+              echo "OpenClaw daemon is up on port $LISTEN_PORT"
               break
             fi
-            echo "Attempt $i/30: port 18789 not ready yet, waiting..."
+            echo "Attempt $i/30: port $LISTEN_PORT not ready yet, waiting..."
             sleep 2
           done
-          if ! ss -tlnp 2>/dev/null | grep -q ':18789'; then
+          if ! ss -tlnp 2>/dev/null | grep -q ":$LISTEN_PORT"; then
             echo "WARNING: OpenClaw gateway did not start within 60s, trying fallback..."
             if [ "${EnableSandbox}" = "true" ]; then
               systemctl restart openshell-forward || echo "SSH forward restart failed"
@@ -638,7 +643,7 @@ Resources:
             export HOME=/root
             SANDBOX_HOST="openshell-$SANDBOX_NAME"
             for plugin in whatsapp telegram discord slack; do
-              sudo -u ubuntu ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                 "$SANDBOX_HOST" "openclaw plugins enable $plugin" 2>&1 || echo "$plugin plugin enable failed"
             done
           else
@@ -658,7 +663,7 @@ Resources:
           On first message, greet the user and offer to connect WhatsApp, Telegram, Discord, or Slack via the Web UI (Channels > Add Channel). Guide them step by step.
           SOUL_EOF
           if [ "${EnableSandbox}" = "true" ]; then
-            cat /tmp/SOUL.md | sudo -u ubuntu ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            cat /tmp/SOUL.md | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               "openshell-$SANDBOX_NAME" "tee /sandbox/.openclaw/SOUL.md > /dev/null" 2>/dev/null || true
           else
             cp /tmp/SOUL.md /home/ubuntu/.openclaw/SOUL.md
@@ -707,8 +712,10 @@ Outputs:
 
   Step2PortForwarding:
     Description: "STEP 2: Run this command on LOCAL computer (keep terminal open)"
-    Value: !Sub |
-      aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
+    Value: !Sub
+      - |
+        aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{"portNumber":["${Port}"],"localPortNumber":["18789"]}'
+      - Port: !If [EnableDocker, "18790", "18789"]
 
   Step3GetToken:
     Description: "STEP 3: Get your access token"

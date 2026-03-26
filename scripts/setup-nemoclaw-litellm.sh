@@ -35,7 +35,7 @@ wait_for() {
 }
 
 ssh_sandbox() {
-  sudo -u ubuntu ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=10 openshell-${SANDBOX_NAME} "$@"
 }
 
@@ -175,15 +175,23 @@ POLICYEOF
 # ── Step 8: Create sandbox ────────────────────────────────────────────
 echo "[8/10] Creating sandbox..."
 openshell sandbox delete "$SANDBOX_NAME" 2>/dev/null || true
+
+# Run sandbox create in background — it opens an SSH session that hangs
+# even with --no-tty. We wait for Ready status and then kill the process.
 openshell sandbox create \
   --name "$SANDBOX_NAME" \
   --from openclaw \
   --provider litellm-bedrock \
   --policy /tmp/sandbox-policy.yaml \
-  --no-tty
+  --no-tty &
+SANDBOX_CREATE_PID=$!
 
 wait_for "sandbox ready" \
   "openshell sandbox list 2>/dev/null | grep -q '$SANDBOX_NAME.*Ready'" 60 3
+
+# Kill the hanging sandbox create process (its SSH session)
+kill $SANDBOX_CREATE_PID 2>/dev/null || true
+wait $SANDBOX_CREATE_PID 2>/dev/null || true
 
 # Patch Sandbox CRD hostAliases to use correct gateway IP, then recreate pod
 echo "  Patching sandbox hostAliases to $GATEWAY_IP..."
@@ -195,13 +203,11 @@ docker exec openshell-cluster-nemoclaw kubectl delete pod "$SANDBOX_NAME" -n ope
 wait_for "sandbox pod running" \
   "docker exec openshell-cluster-nemoclaw kubectl get pod $SANDBOX_NAME -n openshell -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running" 60 3
 
-# Setup SSH config for sandbox access
-sudo -u ubuntu bash -c "
-  mkdir -p ~/.ssh
-  openshell sandbox ssh-config $SANDBOX_NAME > ~/.ssh/openshell-sandbox.conf 2>/dev/null
-  grep -q 'Include.*openshell-sandbox' ~/.ssh/config 2>/dev/null || \
-    echo 'Include ~/.ssh/openshell-sandbox.conf' >> ~/.ssh/config
-"
+# Setup SSH config for sandbox access (root — used by openshell-forward service)
+mkdir -p /root/.ssh
+openshell sandbox ssh-config "$SANDBOX_NAME" > /root/.ssh/openshell-sandbox.conf
+grep -q 'Include.*openshell-sandbox' /root/.ssh/config 2>/dev/null || \
+  echo 'Include /root/.ssh/openshell-sandbox.conf' >> /root/.ssh/config
 
 # ── Step 9: Configure OpenClaw inside sandbox ─────────────────────────
 echo "[9/10] Configuring OpenClaw inside sandbox..."
@@ -251,7 +257,7 @@ json.dump(cfg,open('/tmp/openclaw.json','w'),indent=2)
 "
 
 # Deliver config to sandbox via SSH (not overlayfs — avoids stale file handle issues)
-cat /tmp/openclaw.json | sudo -u ubuntu ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+cat /tmp/openclaw.json | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   openshell-${SANDBOX_NAME} "tee /sandbox/.openclaw/openclaw.json > /dev/null"
 
 # Verify config
@@ -269,7 +275,7 @@ nohup openclaw gateway >/tmp/openclaw-gw.log 2>&1 &
 echo $!
 GWEOF
 
-cat /tmp/start-gw.sh | sudo -u ubuntu ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+cat /tmp/start-gw.sh | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   openshell-${SANDBOX_NAME} "tee /sandbox/start-gw.sh > /dev/null && chmod +x /sandbox/start-gw.sh"
 
 # Start OpenClaw gateway inside sandbox
@@ -278,18 +284,23 @@ sleep 5
 ssh_sandbox "ss -tlnp | grep 18789" && echo "  OpenClaw gateway running on sandbox:18789" || echo "  WARNING: Gateway not listening yet"
 
 # ── Step 10: SSH LocalForward + systemd service ───────────────────────
-echo "[10/10] Setting up SSH port forward (host:18789 -> sandbox:18789)..."
+# Port 18789 on the host is occupied by docker-proxy (openshell gateway).
+# We bind SSH LocalForward on 18790 instead. SSM port forward targets 18790.
+echo "[10/10] Setting up SSH port forward (host:18790 -> sandbox:18789)..."
 
-# Create systemd service for persistent SSH LocalForward
+NVM_NODE_DIR=$(dirname "$(find /root/.nvm/versions/node -name node -type f 2>/dev/null | head -1)" 2>/dev/null)
+
 cat > /etc/systemd/system/openshell-forward.service << EOF
 [Unit]
-Description=SSH LocalForward to OpenClaw sandbox (host:18789 -> sandbox:18789)
+Description=SSH LocalForward to OpenClaw sandbox (host:18790 -> sandbox:18789)
 After=network.target docker.service
 StartLimitIntervalSec=0
 [Service]
 Type=simple
-User=ubuntu
-ExecStart=/usr/bin/ssh -N -L 0.0.0.0:18789:127.0.0.1:18789 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes openshell-${SANDBOX_NAME}
+User=root
+Environment=HOME=/root
+Environment=PATH=${NVM_NODE_DIR}:/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/ssh -N -L 0.0.0.0:18790:127.0.0.1:18789 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes openshell-${SANDBOX_NAME}
 Restart=always
 RestartSec=5
 [Install]
@@ -300,7 +311,7 @@ systemctl daemon-reload
 systemctl enable openshell-forward
 systemctl start openshell-forward
 
-wait_for "SSH port forward on 18789" "ss -tlnp | grep -q ':18789'" 15 2
+wait_for "SSH port forward on 18790" "ss -tlnp | grep -q ':18790'" 15 2
 
 # ── Store gateway token in SSM Parameter Store ────────────────────────
 aws ssm put-parameter \
@@ -321,5 +332,5 @@ echo "  Inference:  https://inference.local -> LiteLLM:4000 -> Bedrock"
 echo "  Dashboard:  http://localhost:18789/#token=$GATEWAY_TOKEN"
 echo "  Access:     aws ssm start-session --target INSTANCE_ID \\"
 echo "                --document-name AWS-StartPortForwardingSession \\"
-echo "                --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+echo "                --parameters '{\"portNumber\":[\"18790\"],\"localPortNumber\":[\"18789\"]}'"
 echo ""
