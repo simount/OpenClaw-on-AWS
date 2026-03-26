@@ -185,6 +185,26 @@ tail -100 /var/log/openclaw-setup.log
 XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status openclaw-gateway
 ```
 
+### Check NemoClaw + LiteLLM (if EnableSandbox=true)
+
+```bash
+# Check LiteLLM proxy status
+sudo systemctl status litellm
+curl -s http://127.0.0.1:4000/health
+
+# Check NemoClaw sandbox status
+sudo systemctl status openclaw-nemoclaw
+
+# View LiteLLM logs
+sudo journalctl -u litellm --no-pager -n 20
+
+# View NemoClaw logs
+sudo journalctl -u openclaw-nemoclaw --no-pager -n 20
+
+# Verify network policy
+cat /etc/nemoclaw/policies/strict-bedrock.yaml
+```
+
 ### Test Bedrock Connection
 
 ```bash

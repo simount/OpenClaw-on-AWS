@@ -142,21 +142,27 @@ Voice messages work on WhatsApp and Telegram — OpenClaw transcribes and respon
 You (WhatsApp/Telegram/Discord)
   │
   ▼
-┌─────────────────────────────────────────────┐
-│  AWS Cloud                                  │
-│                                             │
-│  EC2 (OpenClaw)  ──IAM──▶  Bedrock         │
-│       │                   (Nova/Claude)     │
-│       │                                     │
-│  VPC Endpoints        CloudTrail            │
-│  (private network)    (audit logs)          │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  AWS Cloud                                           │
+│                                                      │
+│  EC2 Instance                                        │
+│  ├── LiteLLM proxy (port 4000) ──IAM──▶ Bedrock     │
+│  │                                   (Nova/Claude)   │
+│  └── NemoClaw sandbox                                │
+│      └── OpenClaw (port 18789)                       │
+│          └── Can ONLY reach LiteLLM (localhost:4000) │
+│                                                      │
+│  VPC Endpoints          CloudTrail                   │
+│  (private network)      (audit logs)                 │
+└──────────────────────────────────────────────────────┘
   │
   ▼
 You (receive response)
 ```
 
 - **EC2**: Runs OpenClaw gateway (~1GB RAM)
+- **LiteLLM**: API proxy to Bedrock, centralized audit logging
+- **NemoClaw**: Network-isolated sandbox (only localhost:4000 allowed)
 - **Bedrock**: Model inference via IAM (no API keys)
 - **SSM**: Secure access, no public ports
 - **VPC Endpoints**: Private network to Bedrock (optional, +$22/mo)
@@ -229,7 +235,7 @@ Switch models with one CloudFormation parameter — no code changes:
 | `OpenClawModel` | Nova 2 Lite | Bedrock model ID |
 | `InstanceType` | c7g.large | EC2 instance type |
 | `CreateVPCEndpoints` | true | Private networking (+$22/mo) |
-| `EnableSandbox` | true | Docker isolation for code execution |
+| `EnableSandbox` | true | NemoClaw sandbox + LiteLLM proxy for network-isolated execution |
 | `CreateS3Bucket` | true | S3 bucket for file sharing skill |
 | `InstallS3FilesSkill` | true | Auto-install S3 file sharing |
 | `KeyPairName` | none | EC2 key pair (optional, for emergency SSH) |
@@ -356,7 +362,7 @@ Uses SiliconFlow (DeepSeek, Qwen, GLM) instead of Bedrock. Requires a SiliconFlo
 | **VPC Endpoints** | Bedrock traffic stays on private network |
 | **SSM Parameter Store** | Gateway token stored as SecureString, never on disk |
 | **Supply-chain protection** | Docker via GPG-signed repos, NVM via download-then-execute (no `curl \| sh`) |
-| **Docker Sandbox** | Isolates code execution in group chats |
+| **NemoClaw Sandbox** | Network-isolated execution — OpenClaw can only reach LiteLLM proxy (localhost:4000) |
 | **CloudTrail** | Every Bedrock API call audited |
 
 **[→ Full Security Guide](SECURITY.md)**
