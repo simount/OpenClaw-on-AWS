@@ -161,7 +161,7 @@ Resources:
     DependsOn: OpenClawInstance
     Properties:
       Handle: !Ref OpenClawWaitHandle
-      Timeout: '1200'
+      Timeout: '2400'
       Count: 1
 
   # ==================== VPC and Network ====================
@@ -426,7 +426,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 30
+            VolumeSize: 50
             VolumeType: gp3
             DeleteOnTermination: true
       UserData:
